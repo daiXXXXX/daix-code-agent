@@ -7,7 +7,9 @@ authors = [
     { name = "xingfeiyang", email = "xingfeiyang@aishi.ai" }
 ]
 requires-python = ">=3.13"
-dependencies = []
+dependencies = [
+    "openai>=3.35.1",
+]
 
 [project.scripts]
 daix-code-agent = "daix_code_agent:main"
