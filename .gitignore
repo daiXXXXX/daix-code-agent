@@ -11,3 +11,6 @@ wheels/
 
 # macOS metadata
 .DS_Store
+
+#env
+.env
