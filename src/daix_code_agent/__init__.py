@@ -1,28 +1,58 @@
 import json
 import os
 import subprocess
-from shlex import shlex
+from asyncio import log
+import shlex
 
 from openai import OpenAI
 from dotenv import load_dotenv
+import logging
+
+from daix_code_agent.tools.search_files import search_files
 
 load_dotenv()
 
-TOOLS = [{
-    "type": "function",
-    "function": {
-        "name": "run_command",
-        "description": "执行终端命令。argv 是参数数组，不支持管道和重定向。",
-        "parameters": {
-            "type": "object",
-            "properties": {
-                "argv": {"type": "array", "items": {"type": "string"}}
+logging.basicConfig(
+    level=logging.INFO,  # 显示 INFO 及以上级别的日志
+    format="%(asctime)s [%(levelname)s] %(message)s",
+    datefmt="%H:%M:%S",
+)
+
+logger = logging.getLogger("init")
+
+TOOLS = [
+    {
+        "type": "function",
+        "function": {
+            "name": "run_command",
+            "description": "执行终端命令。argv 是参数数组，不支持管道和重定向。",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "argv": {"type": "array", "items": {"type": "string"}}
+                },
+                "required": ["argv"],
+                "additionalProperties": False,
             },
-            "required": ["argv"],
-            "additionalProperties": False,
         },
     },
-}]
+    {
+        "type": "function",
+        "function": {
+            "name": "search_files",
+            "description": "根据文件内容中的关键词搜索文件，返回匹配的文件路径",
+            "parameters": {
+                "type": "object",
+                "properties": {
+                    "key_words": {"type": "string"},
+                    "directory": {"type": "string"},
+                },
+                "required": ["key_words"],
+                "additionalProperties": False,
+            },
+        },
+    },
+]
 
 def run_command(argv: list[str]) -> str:
     if (
@@ -32,7 +62,7 @@ def run_command(argv: list[str]) -> str:
     ):
         return "argv invalid"
 
-    print("\n准备执行：{shlex.join(argv)}")
+    print(f"\n准备执行：{shlex.join(argv)}")
 
     answer = input("允许执行？[y/N] ").strip().lower()
 
@@ -71,6 +101,7 @@ def main() -> None:
                 "你是一个 Code Agent，通过终端命令完成用户任务。"
                 "先查看相关文件，再修改代码；修改后运行验证。"
                 "根据工具实际返回结果判断是否完成，用中文回答。"
+                "优先使用内置工具，比如run_command，search_files。"
             ),
         },
         {"role": "user", "content": task},
@@ -90,14 +121,21 @@ def main() -> None:
             print(message.content)
             return
 
+        logger.info(message.tool_calls)
         for call in message.tool_calls:
+            logger.info(message.tool_calls)
             try:
-                if call.function.name != "run_command":
-                    raise ValueError("unknow tool")
-                args = json.loads(call.arguments)
+                args = json.loads(call.function.arguments)
+                if call.function.name == "run_command":
+                    output = run_command(**args)
 
-                # 模型返回的工具参数
-                output = run_command(args["argv"])
+                elif call.function.name == "search_files":
+                    paths = search_files(**args)
+                    output = json.dumps(paths)
+
+                else:
+                    raise ValueError("unknow tool")
+
             except (ValueError, KeyError, TypeError) as exc:
                 output = f"工具参数错误：{exc}"
 
