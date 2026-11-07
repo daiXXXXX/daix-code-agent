@@ -1,14 +1,14 @@
-import json
 import os
-import subprocess
-from asyncio import log
-import shlex
 
-from openai import OpenAI
+from langchain.agents import create_agent
+from langchain.agents.middleware import ModelCallLimitMiddleware
+from langchain_core.runnables import RunnableConfig
+from langchain_openai import ChatOpenAI
 from dotenv import load_dotenv
 import logging
 
 from daix_code_agent.tools.search_files import search_files
+from daix_code_agent.tools.run_command import run_command
 
 load_dotenv()
 
@@ -18,130 +18,62 @@ logging.basicConfig(
     datefmt="%H:%M:%S",
 )
 
+run_config: RunnableConfig | None = {
+    "max_concurrency": 1,
+    "recursion_limit": 100,
+}
+
 logger = logging.getLogger("init")
 
-TOOLS = [
-    {
-        "type": "function",
-        "function": {
-            "name": "run_command",
-            "description": "执行终端命令。argv 是参数数组，不支持管道和重定向。",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "argv": {"type": "array", "items": {"type": "string"}}
-                },
-                "required": ["argv"],
-                "additionalProperties": False,
-            },
-        },
-    },
-    {
-        "type": "function",
-        "function": {
-            "name": "search_files",
-            "description": "根据文件内容中的关键词搜索文件，返回匹配的文件路径",
-            "parameters": {
-                "type": "object",
-                "properties": {
-                    "key_words": {"type": "string"},
-                    "directory": {"type": "string"},
-                },
-                "required": ["key_words"],
-                "additionalProperties": False,
-            },
-        },
-    },
-]
-
-def run_command(argv: list[str]) -> str:
-    if (
-        not isinstance(argv, list) or
-        not argv or
-        not all(isinstance(item, str) for item in argv)
-    ):
-        return "argv invalid"
-
-    print(f"\n准备执行：{shlex.join(argv)}")
-
-    answer = input("允许执行？[y/N] ").strip().lower()
-
-    if answer != "y" :
-        raise SystemExit("已停止")
-
-    try:
-        result = subprocess.run(
-            argv,
-            capture_output=True,
-            text=True,
-            timeout=30,
-        )
-
-        output = {
-            "exit_code": result.returncode,
-            "stdout": result.stdout[:10000],
-            "stderr": result.stderr[:10000],
-        }
-
-        return json.dumps(output, ensure_ascii=False)
-
-    except (OSError, subprocess.TimeoutExpired) as exc:
-        return f"执行失败：{exc}"
-
 def main() -> None:
-    task = input("")
-    client = OpenAI(
+    client = ChatOpenAI(
+        model=os.getenv("OPENAI_MODEL", "qwen3.5-flash"),
         api_key=os.environ["OPENAI_API_KEY"],
         base_url=os.environ["OPENAI_BASE_URL"],
+        use_responses_api=False
     )
-    messages = [
+
+    agent = create_agent(
+        model=client,
+        tools=[run_command, search_files],
+        system_prompt=(
+            "你是一个 Code Agent，通过工具完成用户任务。"
+            "先查看相关文件，再修改代码；修改后运行验证。"
+            "根据工具实际返回结果判断是否完成，用中文回答。"
+        ),
+        middleware=[
+            ModelCallLimitMiddleware(
+                run_limit=10,
+                exit_behavior="end"
+            )
+        ]
+    )
+
+    task = input("请输入：")
+
+    result = agent.invoke(
         {
-            "role": "system",
-            "content": (
-                "你是一个 Code Agent，通过终端命令完成用户任务。"
-                "先查看相关文件，再修改代码；修改后运行验证。"
-                "根据工具实际返回结果判断是否完成，用中文回答。"
-                "优先使用内置工具，比如run_command，search_files。"
-            ),
+            "messages": [{"role": "user", "content": task}]
         },
-        {"role": "user", "content": task},
-    ]
+        config={
+            "max_concurrency": 1,
+            "recursion_limit": 100,
+        },
+    )
 
-    for _ in range(10):
-        response = client.chat.completions.create(
-            model=os.getenv("OPENAI_MODEL", "qwen3.5-flash"),
-            messages=messages,
-            tools=TOOLS
-        )
+    # 流式输出
+    # for chunk, update in agent.stream(
+    #     {"messages": [{"role": "user", "content": task}]},
+    #     config = run_config,
+    #     stream_mode="messages",
+    # ):
+    #     print(chunk.text, end = "", flush=True)
+        # for step, item in update.items():
+        #     if not isinstance(item, dict):
+        #         continue
+        #
+        #     for message in item.get("messages", []):
+        #         print(f"----{step}---")
+        #         message.pretty_print()
 
-        message = response.choices[0].message
-        messages.append(message.model_dump(exclude_none=True))
-
-        if not message.tool_calls:
-            print(message.content)
-            return
-
-        logger.info(message.tool_calls)
-        for call in message.tool_calls:
-            logger.info(message.tool_calls)
-            try:
-                args = json.loads(call.function.arguments)
-                if call.function.name == "run_command":
-                    output = run_command(**args)
-
-                elif call.function.name == "search_files":
-                    paths = search_files(**args)
-                    output = json.dumps(paths)
-
-                else:
-                    raise ValueError("unknow tool")
-
-            except (ValueError, KeyError, TypeError) as exc:
-                output = f"工具参数错误：{exc}"
-
-            messages.append({
-                "role": "tool",
-                "tool_call_id": call.id,
-                "content": output,
-            })
-    raise SystemExit("达到 10 轮上限，任务尚未确认完成")
+    print(result["messages"][-1].text)
